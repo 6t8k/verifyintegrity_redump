@@ -1,19 +1,29 @@
 #!/bin/python3
 
 import argparse
+import collections
 import glob
 import hashlib
+import json
 import logging
 import os
 import sys
 import xml.etree.ElementTree as ET
 
+DEF_CHECK_FNAME_EXTS = "bin,cue"
+DEF_CHUNKSIZE = 4096
+
 parser = argparse.ArgumentParser(
-    description="Check integrity of redump PlayStation bin/cue files.")
+    description="Verify integrity of disc images against a Redump datfile.")
 parser.add_argument("-d", "--datfile", type=str,
                     required=True, help="Path to the reference datfile.")
 parser.add_argument("-c", "--check-dir", type=str,
                     required=True, help="Path to the directory to check.")
+parser.add_argument("-f", "--filename-extensions", type=str,
+                    default=DEF_CHECK_FNAME_EXTS, help="Comma-separated list"
+                    " of filename extensions (without leading '.'). This"
+                    " script will only examine files the names of which have"
+                    " these extensions. Default value: '{}'".format(DEF_CHECK_FNAME_EXTS))
 args = parser.parse_args()
 
 logging.root.setLevel(logging.NOTSET)
@@ -53,12 +63,12 @@ def build_sha1_to_name_dict(parsed_datfile):
     return roms
 
 
-def bin_and_cue_files(search_dir):
-    return filter(lambda x: os.path.splitext(x)[1] in ['.bin', '.cue'],
-                  glob.iglob(os.path.join(search_dir, '**'), recursive=True))
+def files_to_verify(search_dir, check_fname_exts):
+    return filter(lambda x: x[1] in check_fname_exts,
+                  ((y, os.path.splitext(y)[1]) for y in glob.iglob(os.path.join(search_dir, '**'), recursive=True)))
 
 
-def next_chunk(f, chunk_size=4096):
+def next_chunk(f, chunk_size=DEF_CHUNKSIZE):
     while True:
         chunk = f.read(chunk_size)
         if not chunk:
@@ -67,7 +77,15 @@ def next_chunk(f, chunk_size=4096):
 
 
 def main(_args):
-    logger.info("Parsing datfile '%s' ...", _args.datfile)
+    logger.info("Starting with arguments: %s", vars(_args))
+
+    checked_files_count = collections.defaultdict(int)
+    bad_files_count = collections.defaultdict(int)
+    skipped_files_count = collections.defaultdict(int)
+    check_fname_exts = ['.{}'.format(x)
+                        for x in _args.filename_extensions.split(',')]
+
+    logger.info("Parsing datfile ...")
     datfile = load_and_parse_datfile(_args.datfile)
     if not datfile:
         logger.critical("No datfile - aborting.")
@@ -80,10 +98,7 @@ def main(_args):
         sys.exit(1)
 
     logger.info("Checking file integrity ...")
-    checked_files_count = 0
-    bad_files_count = 0
-    skipped_files_count = 0
-    for _file in bin_and_cue_files(_args.check_dir):
+    for _file, ext in files_to_verify(_args.check_dir, check_fname_exts):
         file_hash = ''
         sha1 = hashlib.sha1()
         try:
@@ -93,15 +108,16 @@ def main(_args):
             file_hash = sha1.hexdigest()
         except OSError as err:
             logger.error("Could not open file '%s', skipping: %s", _file, err)
-            skipped_files_count += 1
+            skipped_files_count[ext] += 1
         else:
             if file_hash not in roms:
-                logger.warning("%s | %s | not found", _file, file_hash)
-                bad_files_count += 1
-            checked_files_count += 1
+                logger.warning("%s | %s | not found",
+                               json.dumps(_file), file_hash)
+                bad_files_count[ext] += 1
+            checked_files_count[ext] += 1
 
-    logger.info("Done; integrity of %u files was checked, of which %u files did not match any redump hash. %u files were skipped.",
-                checked_files_count, bad_files_count, skipped_files_count)
+    logger.info("Done; checked files: %s, bad files: %s, skipped files: %s.",
+                dict(checked_files_count), dict(bad_files_count), dict(skipped_files_count))
 
 
 if __name__ == "__main__":
